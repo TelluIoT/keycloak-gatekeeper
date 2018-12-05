@@ -55,11 +55,15 @@ func (r *oauthProxy) getRedirectionURL(w http.ResponseWriter, req *http.Request)
 		redirect = r.config.RedirectionURL
 	}
 
-	state, _ := req.Cookie("OAuth_Token_Request_State")
-	if state != nil && req.URL.Query().Get("state") != state.Value {
-		r.log.Error("State parameter mismatch")
-		w.WriteHeader(http.StatusForbidden)
-		return ""
+	stateCookie, _ := req.Cookie("OAuth_Token_Request_State")
+	if stateCookie != nil {
+		hashIndex := strings.Index(stateCookie.Value, "#")
+		state := stateCookie.Value[:hashIndex]
+		if req.URL.Query().Get("state") != state {
+			r.log.Error("State parameter mismatch")
+			w.WriteHeader(http.StatusForbidden)
+			return ""
+		}
 	}
 	return fmt.Sprintf("%s%s", redirect, r.config.WithOAuthURI("callback"))
 }
@@ -201,24 +205,31 @@ func (r *oauthProxy) oauthCallbackHandler(w http.ResponseWriter, req *http.Reque
 		r.dropAccessTokenCookie(req, w, accessToken, time.Until(identity.ExpiresAt))
 	}
 
-	// step: decode the state variable
-	state := "/"
+	// step: decode the request state cookie to find redirect URI
+	redirectURI := "/"
 	if req.URL.Query().Get("state") != "" {
-		decoded, err := base64.StdEncoding.DecodeString(req.URL.Query().Get("state"))
+		stateCookie, err := req.Cookie("OAuth_Token_Request_State")
 		if err != nil {
-			r.log.Warn("unable to decode the state parameter",
-				zap.String("state", req.URL.Query().Get("state")),
+			r.log.Warn("unable to find request state cookie",
 				zap.Error(err))
 		} else {
-			state = string(decoded)
+			hashIndex := strings.Index(stateCookie.Value, "#")
+			encodedRequestURI := stateCookie.Value[hashIndex + 1:]
+			decoded, err := base64.StdEncoding.DecodeString(encodedRequestURI)
+			if err != nil {
+				r.log.Warn("unable to decode redirect URI", zap.Error(err))
+			} else {
+				redirectURI = string(decoded)
+			}
 		}
 	}
+	
 	if r.config.BaseURI != "" {
-		// assuming state starts with slash
-		state = r.config.BaseURI + state
+		// assuming redirectURI starts with slash
+		redirectURI = r.config.BaseURI + redirectURI
 	}
 
-	r.redirectToURL(state, w, req, http.StatusTemporaryRedirect)
+	r.redirectToURL(redirectURI, w, req, http.StatusTemporaryRedirect)
 }
 
 // loginHandler provide's a generic endpoint for clients to perform a user_credentials login to the provider
